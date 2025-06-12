@@ -1,25 +1,111 @@
 package top.mcocet.loginSequenceOnline;
 
+import org.bukkit.Bukkit;
+import org.bukkit.ChatColor;
+import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
-
+import io.papermc.paper.threadedregions.scheduler.GlobalRegionScheduler;
 import java.io.File;
 import java.io.IOException;
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
-import java.net.SocketException;
-import java.nio.charset.StandardCharsets;
+import java.net.InetAddress;
 
 public class LoginSequenceOnline extends JavaPlugin {
-    private DatagramSocket socket;
+    private UDPNet udpNet;
     private int port;
-    private volatile boolean running;
+    private  int serverVersion;
 
     @Override
     public void onEnable() {
-        getLogger().info("LoginSequenceOnline 插件已启用");
+        // 初始化日志和配置
+        printLogo();
+        createConfig();
 
-        // 检查并创建配置文件
-        File configFile = new File(getDataFolder(), "Config.yml");
+        // 初始化网络模块
+        port = getConfig().getInt("Port", 1234);
+        udpNet = new UDPNet(this, port);
+        udpNet.startListening(this::handleIncomingPacket);
+
+        getLogger().info("LoginSequenceOnline已启用！");
+        getLogger().info("LoginSequenceOnline已支持Folia！");
+
+        if (udpNet.isFolia()){
+            getLogger().info("检测到服务器为Folia类！");
+            // 获取服务器版本字符串（示例格式：1.21.4-R0.1-SNAPSHOT）
+            String version = Bukkit.getBukkitVersion().split("-")[0];
+            String[] parts = version.split("\\.");
+            // 转换为数字版本号
+            int major = Integer.parseInt(parts[0]);
+            int minor = Integer.parseInt(parts[1]);
+            int patch = parts.length > 2 ? Integer.parseInt(parts[2]) : 0;
+            // 检查是否低于1.21.4
+            // 此API在Folia 1.21.4中添加
+            if (major < 1 || (major == 1 && (minor < 21 || (minor == 21 && patch < 4)))) {
+                serverVersion = 0;
+                sayLog(ChatColor.RED + "Folia版本过低，将无法获取服务器TPS信息！");
+                sayLog(ChatColor.YELLOW + "请升级至Folia 1.21.4+ 或使用Bukkit类服务器！");
+            } else {
+                serverVersion = 1;
+            }
+        } else {
+            getLogger().info("检测到服务器为Bukkit类！");
+        }
+    }
+
+    private void handleIncomingPacket(String message, InetAddress address, int port) {
+        if (message.contains("LoginSequence-Hello")) {
+            processHelloPacket(address, port);
+        } else if (message.contains("LoginSequence-Info")) {
+            processInfoPacket(address, port);
+        }
+    }
+
+    private void processHelloPacket(InetAddress address, int port) {
+        getLogger().info("收到 “LoginSequence-Hello” 消息，来自：" + address.getHostAddress() + ":" + port);
+        udpNet.sendResponse("LoginSequence-Online", address, port);
+        sayLog(ChatColor.GREEN + "已发送 “LoginSequence-Online” 响应");
+    }
+
+    private void processInfoPacket(InetAddress address, int port) {
+        getLogger().info("收到 “LoginSequence-Info” 请求，来自：" + address.getHostAddress() + ":" + port);
+
+        long memUsed = (Runtime.getRuntime().totalMemory() -
+                Runtime.getRuntime().freeMemory()) / 1024 / 1024;
+        int onlinePlayers = getServer().getOnlinePlayers().size();
+        double tps = getCurrentTPS();
+        String response = String.format("LoginSequence-Data Memory:%dMB Online:%d TPS:%.1f", memUsed, onlinePlayers, tps);
+        udpNet.sendResponse(response, address, port);
+        sayLog(ChatColor.GREEN + "已发送 “LoginSequence-Data” 响应");
+        sayLog(ChatColor.AQUA + response);
+    }
+
+    private double getCurrentTPS() {
+        try {
+            if (udpNet.isFolia()) {
+                return (Bukkit.getTPS()[0]);
+            } else {
+                return getStandardTPS();
+            }
+        } catch (Exception e) {
+            sayLog(ChatColor.RED + "获取TPS失败: " + e.getMessage());
+            return (-1.0);
+        }
+    }
+
+    private double getStandardTPS() throws Exception {
+        Object minecraftServer = getServer().getClass().getMethod("getServer").invoke(getServer());
+        double[] recentTps = (double[]) minecraftServer.getClass().getField("recentTps").get(minecraftServer);
+        return recentTps[0];
+    }
+
+    // 以下原有方法保持不变
+    private void printLogo() {
+        // logo
+        sayLog(ChatColor.AQUA+"    "+" "+ChatColor.BLUE+" __ "+" "+ChatColor.YELLOW+" ___"+" "+ChatColor.GOLD+"  __ ");
+        sayLog(ChatColor.AQUA+"|   "+" "+ChatColor.BLUE+"(__ "+" "+ChatColor.YELLOW+"|___"+" "+ChatColor.GOLD+" /  \\");
+        sayLog(ChatColor.AQUA+"|___"+" "+ChatColor.BLUE+" __)"+" "+ChatColor.YELLOW+"|___"+" "+ChatColor.GOLD+" \\__/ "+ChatColor.GREEN+"    LoginSequenceOnline v1.3");
+        sayLog("");
+    }
+    private void createConfig() {File configFile = new File(getDataFolder(), "Config.yml");
         if (!configFile.exists()) {
             getLogger().info("配置文件不存在，正在创建...");
             try {
@@ -41,85 +127,17 @@ public class LoginSequenceOnline extends JavaPlugin {
             getConfig().set("Port", 1234); // 如果是默认值，写入配置文件
             saveConfig();
         }
-
-        // 启动 UDP 监听线程
-        running = true; // 初始化运行状态
-        new Thread(this::startUDPListener).start();
     }
-
-    private void startUDPListener() {
-        try {
-            socket = new DatagramSocket(port);
-            getLogger().info("UDP 服务已启动，监听端口：" + port);
-
-            byte[] buffer = new byte[1024];
-            DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-
-            while (running) { // 修改循环条件为运行状态标志位
-                socket.receive(packet);
-                String message = new String(packet.getData(), packet.getOffset(), packet.getLength(), StandardCharsets.UTF_8);
-
-                if (message.contains("LoginSequence-Hello")) {
-                    getLogger().info("收到 'LoginSequence-Hello' 消息，来自：" + packet.getAddress().getHostAddress() + ":" + packet.getPort());
-
-                    // 构造响应消息
-                    String response = "LoginSequence-Online";
-                    byte[] responseData = response.getBytes(StandardCharsets.UTF_8);
-                    DatagramPacket responsePacket = new DatagramPacket(responseData, responseData.length, packet.getAddress(), packet.getPort());
-                    socket.send(responsePacket); // 发送响应
-                    getLogger().info("已发送 'LoginSequence-Online' 响应");
-                }
-                // 返回服务器信息
-                if (message.contains("LoginSequence-Info")) {
-                    getLogger().info("收到服务器信息请求，来自：" + packet.getAddress().getHostAddress());
-                    long memUsed = (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) / 1024 / 1024;
-                    int onlinePlayers = getServer().getOnlinePlayers().size();
-                    double tps;
-                    try {
-                        // 通过反射获取MinecraftServer实例
-                        Object minecraftServer = getServer().getClass().getMethod("getServer").invoke(getServer());
-                        // 获取TPS数组（索引0对应最近1分钟的TPS）
-                        double[] recentTps = (double[]) minecraftServer.getClass().getField("recentTps").get(minecraftServer);
-                        tps = recentTps[0];
-                    } catch (Exception e) {
-                        getLogger().warning("获取TPS失败，错误：" + e.getMessage());
-                        tps = 0.0;
-                    }
-
-                    // 构造响应（TPS 保留 1 位小数）
-                    String response = String.format("LoginSequence-Data Memory:%dMB Online:%d TPS:%.1f",
-                            memUsed, onlinePlayers, tps);
-
-                    byte[] responseData = response.getBytes(StandardCharsets.UTF_8);
-                    DatagramPacket responsePacket = new DatagramPacket(responseData, responseData.length,
-                            packet.getAddress(), packet.getPort());
-                    socket.send(responsePacket);
-                    getLogger().info("已发送服务器状态：" + response);
-                }
-
-            }
-        } catch (SocketException e) {
-            if (running) { // 仅在非正常关闭时记录错误
-                getLogger().severe("UDP 监听时出错");
-                e.printStackTrace();
-            }
-        } catch (Exception e) {
-            getLogger().severe("UDP 监听时出错");
-            e.printStackTrace();
-        } finally {
-            if (socket != null && !socket.isClosed()) {
-                socket.close();
-            }
-        }
+    private void sayLog(String s) {
+        CommandSender sender = Bukkit.getConsoleSender();
+        sender.sendMessage(s);
     }
 
     @Override
     public void onDisable() {
-        getLogger().info("LoginSequenceOnline 插件已禁用");
-        running = false;
-        if (socket != null && !socket.isClosed()) {
-            socket.close(); // 关闭socket
+        getLogger().info("插件已禁用");
+        if (udpNet != null) {
+            udpNet.closeSocket();
         }
-        getLogger().info("UDP监听服务已关闭");
     }
 }
